@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Qui intervient ? – CLIC Orne</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 700px;
+            margin: 40px auto;
+            padding: 0 15px;
+            background: #f5f5f5;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            text-align: center;
+            font-size: 0.9rem;
+            color: #555;
+            margin-bottom: 25px;
+        }
+
+        .search-box {
+            position: relative;
+            margin-bottom: 5px;
+        }
+
+        .search-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            font-size: 16px;
+        }
+
+        button {
+            padding: 8px 16px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #suggestions {
+            position: absolute;
+            top: 36px;
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-top: none;
+            z-index: 10;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .suggestion-item {
+            padding: 6px 8px;
+            cursor: pointer;
+        }
+
+        .suggestion-item:hover {
+            background: #eee;
+        }
+
+        #message {
+            min-height: 20px;
+            margin-bottom: 10px;
+            color: #b00;
+        }
+
+        .card {
+            background: white;
+            border-radius: 6px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .commune-name {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        ul {
+            padding-left: 20px;
+            margin: 4px 0 0 0;
+        }
+
+        li {
+            margin-bottom: 3px;
+        }
+
+        .role-label {
+            font-weight: bold;
+        }
+
+        .note {
+            font-size: 0.8rem;
+            color: #666;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Qui intervient sur cette commune ?</h1>
+    <div class="subtitle">CLIC Orne – saisissez une commune pour voir les intervenants</div>
+
+    <div class="search-box">
+        <div class="search-row">
+            <input type="text" id="communeInput" placeholder="Ex : Alençon, Bagnoles de l'Orne Normandie...">
+            <button id="searchBtn">Rechercher</button>
+        </div>
+        <div id="suggestions"></div>
+    </div>
+
+    <div id="message"></div>
+    <div id="result"></div>
+
+    <div class="note">
+        • Suggestions proposées à partir de 3 caractères<br>
+        • Recherche insensible aux majuscules et accents<br>
+        • Données issues du fichier de répartition interne (CSV encodé en UTF-8)
+    </div>
+
+    <script>
+        let data = {};      // commune -> fiche structurée
+        let communes = [];  // liste des communes
+        let index = {};     // commune normalisée -> commune
+        let loaded = false;
+
+        function normalize(str) {
+            return str
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .toLowerCase()
+                .trim();
+        }
+
+        function buildIndex() {
+            index = {};
+            communes = Object.keys(data).sort((a, b) => a.localeCompare(b, "fr"));
+            communes.forEach(commune => {
+                index[normalize(commune)] = commune;
+            });
+        }
+
+        function loadCSV() {
+            const message = document.getElementById("message");
+            message.textContent = "Chargement des données...";
+
+            fetch("repartitions.csv")
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error("Impossible de charger le fichier CSV");
+                    }
+                    return response.text();
+                })
+                .then(text => {
+                    const lines = text.trim().split(/\r?\n/);
+                    if (lines.length <= 1) {
+                        throw new Error("Fichier CSV vide ou incorrect");
+                    }
+
+                    const header = lines[0].split(";");
+                    const getIndex = (name) => header.indexOf(name);
+
+                    const idxCommuneCorrigee = getIndex("Commune corrigée");
+                    const idxCommune = getIndex("commune");
+                    const communeCol = idxCommuneCorrigee !== -1 ? idxCommuneCorrigee : idxCommune;
+                    if (communeCol === -1) {
+                        throw new Error("Colonne 'Commune corrigée' ou 'commune' introuvable");
+                    }
+
+                    const idxAntenne = getIndex("Antenne");
+                    const idxNumAntenne = getIndex("Numéro antenne");
+
+                    const cols = {
+                        coordinatrice: {
+                            nom: getIndex("coordinatrice"),
+                            tel: getIndex("Portable coordinatrice"),
+                            mail: getIndex("mail coordinatrice")
+                        },
+                        chargee_prevention: {
+                            nom: getIndex("chargee_prevention"),
+                            tel: getIndex("Portable chargee_prevention"),
+                            mail: getIndex("mail chargee_prevention")
+                        },
+                        assistante_coordination: {
+                            nom: getIndex("assistante de coordination")
+                        },
+                        agent_accueil: {
+                            nom: getIndex("agent d'accueil social")
+                        },
+                        responsable_departementale: {
+                            nom: getIndex("responsable départementale"),
+                            tel: getIndex("portable responsable départementale"),
+                            mail: getIndex("mail responsable departementale")
+                        }
+                    };
+
+                    const tmp = {};
+
+                    for (let i = 1; i < lines.length; i++) {
+                        if (!lines[i].trim()) continue;
+                        const cells = lines[i].split(";");
+
+                        const commune = (cells[communeCol] || "").trim();
+                        if (!commune) continue;
+
+                        if (!tmp[commune]) {
+                            tmp[commune] = {
+                                antenne: null,
+                                numAntenne: null,
+                                coordinatrice: null,
+                                chargee_prevention: null,
+                                assistante_coordination: null,
+                                agent_accueil: null,
+                                responsable_departementale: null
+                            };
+                        }
+
+                        const obj = tmp[commune];
+
+                        if (idxAntenne !== -1) {
+                            const val = (cells[idxAntenne] || "").trim();
+                            if (val && !obj.antenne) obj.antenne = val;
+                        }
+
+                        if (idxNumAntenne !== -1) {
+                            const val = (cells[idxNumAntenne] || "").trim();
+                            if (val && !obj.numAntenne) obj.numAntenne = val;
+                        }
+
+                        function fillRole(roleKey, colSet) {
+                            const nomIdx = colSet.nom;
+                            if (nomIdx === -1) return;
+                            const nomVal = (cells[nomIdx] || "").trim();
+                            if (!nomVal) return;
+
+                            const telVal = colSet.tel !== undefined && colSet.tel !== -1 ? (cells[colSet.tel] || "").trim() : "";
+                            const mailVal = colSet.mail !== undefined && colSet.mail !== -1 ? (cells[colSet.mail] || "").trim() : "";
+
+                            if (!obj[roleKey]) {
+                                obj[roleKey] = {
+                                    nom: nomVal || null,
+                                    tel: telVal || null,
+                                    mail: mailVal || null
+                                };
+                            }
+                        }
+
+                        fillRole("coordinatrice", cols.coordinatrice);
+                        fillRole("chargee_prevention", cols.chargee_prevention);
+                        fillRole("assistante_coordination", cols.assistante_coordination);
+                        fillRole("agent_accueil", cols.agent_accueil);
+                        fillRole("responsable_departementale", cols.responsable_departementale);
+                    }
+
+                    data = tmp;
+                    buildIndex();
+                    loaded = true;
+                    message.textContent = "";
+                })
+                .catch(err => {
+                    console.error(err);
+                    message.textContent = "Erreur de chargement des données. Vérifier le fichier 'repartitions.csv' (UTF-8, séparateur ;).";
+                });
+        }
+
+        function formatLine(label, obj, withTelMail = true) {
+            if (!obj || !obj.nom) return null;
+            let text = "<span class=\"role-label\">" + label + " :</span> " + obj.nom;
+            if (withTelMail) {
+                const parts = [];
+                if (obj.tel) parts.push(obj.tel);
+                if (obj.mail) parts.push(obj.mail);
+                if (parts.length > 0) {
+                    text += " (" + parts.join(" | ") + ")";
+                }
+            }
+            return text;
+        }
+
+        function renderFiche(commune) {
+            const result = document.getElementById("result");
+            const message = document.getElementById("message");
+            result.innerHTML = "";
+            message.textContent = "";
+
+            if (!loaded) {
+                message.textContent = "Les données ne sont pas encore chargées.";
+                return;
+            }
+
+            if (!commune || !data[commune]) {
+                message.textContent = "Aucun intervenant trouvé pour cette commune.";
+                return;
+            }
+
+            const fiche = data[commune];
+
+            const card = document.createElement("div");
+            card.className = "card";
+
+            const title = document.createElement("div");
+            title.className = "commune-name";
+            title.textContent = commune;
+            card.appendChild(title);
+
+            const list = document.createElement("ul");
+
+            if (fiche.antenne || fiche.numAntenne) {
+                const li = document.createElement("li");
+                let txt = "<span class=\"role-label\">Antenne :</span> " + (fiche.antenne || "");
+                if (fiche.numAntenne) {
+                    txt += " (" + fiche.numAntenne + ")";
+                }
+                li.innerHTML = txt;
+                list.appendChild(li);
+            }
+
+            const coordLine = formatLine("Coordinatrice", fiche.coordinatrice, true);
+            if (coordLine) {
+                const li = document.createElement("li");
+                li.innerHTML = coordLine;
+                list.appendChild(li);
+            }
+
+            const prevLine = formatLine("Chargé·e de mission/prévention", fiche.chargee_prevention, true);
+            if (prevLine) {
+                const li = document.createElement("li");
+                li.innerHTML = prevLine;
+                list.appendChild(li);
+            }
+
+            if (fiche.assistante_coordination && fiche.assistante_coordination.nom) {
+                const li = document.createElement("li");
+                li.innerHTML = "<span class=\"role-label\">Assistante :</span> " +
+                    fiche.assistante_coordination.nom;
+                list.appendChild(li);
+            }
+
+            if (fiche.agent_accueil && fiche.agent_accueil.nom) {
+                const li = document.createElement("li");
+                li.innerHTML = "<span class=\"role-label\">Agent d'accueil social :</span> " +
+                    fiche.agent_accueil.nom;
+                list.appendChild(li);
+            }
+
+            const respLine = formatLine("Responsable départementale", fiche.responsable_departementale, true);
+            if (respLine) {
+                const li = document.createElement("li");
+                li.innerHTML = respLine;
+                list.appendChild(li);
+            }
+
+            card.appendChild(list);
+            result.appendChild(card);
+        }
+
+        function showSuggestions() {
+            const input = document.getElementById("communeInput");
+            const suggestionsDiv = document.getElementById("suggestions");
+            const query = input.value.trim();
+
+            suggestionsDiv.innerHTML = "";
+            suggestionsDiv.style.display = "none";
+
+            if (!loaded || query.length < 3) {
+                return;
+            }
+
+            const normQuery = normalize(query);
+            const matches = communes.filter(c =>
+                normalize(c).includes(normQuery)
+            ).slice(0, 20);
+
+            if (matches.length === 0) {
+                return;
+            }
+
+            matches.forEach(commune => {
+                const div = document.createElement("div");
+                div.className = "suggestion-item";
+                div.textContent = commune;
+                div.addEventListener("click", () => {
+                    input.value = commune;
+                    hideSuggestions();
+                    renderFiche(commune);
+                });
+                suggestionsDiv.appendChild(div);
+            });
+
+            suggestionsDiv.style.display = "block";
+        }
+
+        function hideSuggestions() {
+            const suggestionsDiv = document.getElementById("suggestions");
+            suggestionsDiv.innerHTML = "";
+            suggestionsDiv.style.display = "none";
+        }
+
+        function searchCommune() {
+            const input = document.getElementById("communeInput");
+            const message = document.getElementById("message");
+            const query = input.value.trim();
+            const result = document.getElementById("result");
+
+            hideSuggestions();
+            result.innerHTML = "";
+            message.textContent = "";
+
+            if (!loaded) {
+                message.textContent = "Les données ne sont pas encore chargées.";
+                return;
+            }
+
+            if (!query) {
+                message.textContent = "Indiquez une commune.";
+                return;
+            }
+
+            const norm = normalize(query);
+            let commune = index[norm];
+
+            if (!commune) {
+                const matches = communes.filter(c => normalize(c) === norm);
+                if (matches.length > 0) {
+                    commune = matches[0];
+                } else {
+                    const contains = communes.filter(c => normalize(c).includes(norm));
+                    if (contains.length > 0) {
+                        commune = contains[0];
+                    }
+                }
+            }
+
+            renderFiche(commune);
+        }
+
+        document.getElementById("searchBtn").addEventListener("click", searchCommune);
+        document.getElementById("communeInput").addEventListener("keyup", (e) => {
+            showSuggestions();
+            if (e.key === "Enter") {
+                searchCommune();
+            }
+        });
+
+        document.addEventListener("click", (e) => {
+            const box = document.querySelector(".search-box");
+            if (!box.contains(e.target)) {
+                hideSuggestions();
+            }
+        });
+
+        loadCSV();
+    </script>
+</body>
+</html>
